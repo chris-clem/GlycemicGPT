@@ -33,6 +33,7 @@ the single final commit is about glucose/state atomicity, not credential safety.
 from __future__ import annotations
 
 import asyncio
+import os
 import uuid
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
@@ -68,6 +69,21 @@ logger = get_logger(__name__)
 # Tracked as follow-up issues ("help wanted"); add the
 # stream here together with its mapper support, never one without the other.
 SYNC_PUMP_STREAMS = ("scheduled_basals", "normal_boluses", "events", "insulins")
+
+# LOCAL DEPLOY PATCH (not for upstream): skip Glooko CGM ingestion entirely.
+# For deployments with a direct CGM integration (e.g. Dexcom), Glooko's copy of
+# the same trace conflicts with it: retrospectively-smoothed values diverge from
+# the real-time stream (observed up to 77 mg/dL), and sub-second timestamp
+# precision differences defeat the exact-timestamp dedupe. The proper fix is a
+# per-connection toggle (upstream issue); until then this env kill-switch keeps
+# Glooko as a doses-only source. Set GLOOKO_CGM_SYNC_DISABLED=true on the api.
+_CGM_SYNC_DISABLED_ENV = "GLOOKO_CGM_SYNC_DISABLED"
+
+
+def _cgm_sync_disabled() -> bool:
+    value = os.environ.get(_CGM_SYNC_DISABLED_ENV, "")
+    return value.strip().lower() in ("1", "true", "yes")
+
 
 # --- Incremental tuning ---
 # First incremental sync (no stored cursor) pulls only the recent window so a
@@ -299,6 +315,8 @@ async def _sync_glooko_for_user_locked(
                 "last_updated_at": page.last_updated_at,
                 "last_guid": page.last_guid,
             }
+        if _cgm_sync_disabled():
+            return stream_records, []
         cgm_points = await client.fetch_cgm_points(_iso_z(cgm_start), _iso_z(cgm_end))
         return stream_records, cgm_points
 
@@ -364,6 +382,8 @@ async def _import_glooko_history_locked(
             stream_records[stream] = page.records
             if not page.last_page:
                 truncated.append(stream)
+        if _cgm_sync_disabled():
+            return stream_records, []
         cgm_points = await _import_cgm_points(client, now)
         return stream_records, cgm_points
 
